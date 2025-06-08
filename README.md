@@ -402,6 +402,10 @@ docker-compose build --no-cache
 - 🌙 **Dark Mode Toggle** - Theme customization
 
 ---
+![image](https://github.com/user-attachments/assets/c49d0857-415f-4bf3-9bc0-95d07c3a496f)
+
+![image](https://github.com/user-attachments/assets/a4f6d3ef-8868-4a4b-b9dd-9efddccdd9e6)
+
 
 ## 🔒 License & Ownership
 
