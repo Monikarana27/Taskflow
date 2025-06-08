@@ -1,0 +1,9 @@
+@"
+sentence-transformers==2.2.2
+psycopg2-binary==2.9.7
+python-dotenv==1.0.0
+numpy==1.24.3
+torch==2.0.1
+transformers==4.33.2
+huggingface_hub==0.16.4
+"@ | Out-File -FilePath "vector-service\requirements.txt" -Encoding UTF8
