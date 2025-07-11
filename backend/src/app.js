@@ -11,14 +11,31 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// PostgreSQL connection
-const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 5432,
-  database: process.env.DB_NAME || 'taskdb',
-  user: process.env.DB_USER || 'taskuser',
-  password: process.env.DB_PASSWORD || 'taskpass',
-});
+// PostgreSQL connection - FIXED VERSION
+let pool;
+
+if (process.env.DATABASE_URL) {
+  // Use DATABASE_URL (for Render, Heroku, etc.)
+  console.log('🔄 Using DATABASE_URL for PostgreSQL connection');
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+      require: true,
+      rejectUnauthorized: false
+    }
+  });
+} else {
+  // Use individual environment variables (for local development)
+  console.log('🔄 Using individual environment variables for PostgreSQL');
+  console.log('🔍 DB_HOST:', process.env.DB_HOST || 'localhost');
+  pool = new Pool({
+    host: process.env.DB_HOST || 'localhost',
+    port: process.env.DB_PORT || 5432,
+    database: process.env.DB_NAME || 'taskdb',
+    user: process.env.DB_USER || 'taskuser',
+    password: process.env.DB_PASSWORD || 'taskpass',
+  });
+}
 
 // Upstash Redis connection
 const redisClient = new Redis({
@@ -151,8 +168,20 @@ const initializeDatabase = async () => {
   }
 };
 
-   
 // Routes
+
+// Root route - Add this for basic frontend
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Task Management API',
+    version: '1.0.0',
+    endpoints: {
+      health: '/health',
+      tasks: '/api/tasks',
+      search: '/api/tasks/search'
+    }
+  });
+});
 
 // Health check endpoint
 app.get('/health', async (req, res) => {
