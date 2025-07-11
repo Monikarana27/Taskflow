@@ -8,20 +8,35 @@ const { Sequelize } = require('sequelize');
  // logging: console.log, // Set to false to disable SQL logging
 //});
 
-// Option 2: PostgreSQL (uncomment if using PostgreSQL)
+// Option 2: PostgreSQL (for production with DATABASE_URL or individual vars)
+let sequelize;
 
-const sequelize = new Sequelize(
-  process.env.DB_NAME || 'task_management',
-  process.env.DB_USER || 'postgres',
-  process.env.DB_PASSWORD || 'password',
-  {
-    host: process.env.DB_HOST || 'localhost',
-    port: process.env.DB_PORT || 5432,
+if (process.env.DATABASE_URL) {
+  // Use DATABASE_URL (typical for Render, Heroku, etc.)
+  sequelize = new Sequelize(process.env.DATABASE_URL, {
     dialect: 'postgres',
+    dialectOptions: {
+      ssl: {
+        require: true,
+        rejectUnauthorized: false
+      }
+    },
     logging: console.log,
-  }
-);
-
+  });
+} else {
+  // Use individual environment variables (for local development)
+  sequelize = new Sequelize(
+    process.env.DB_NAME || 'task_management',
+    process.env.DB_USER || 'postgres',
+    process.env.DB_PASSWORD || 'password',
+    {
+      host: process.env.DB_HOST || 'localhost',
+      port: process.env.DB_PORT || 5432,
+      dialect: 'postgres',
+      logging: console.log,
+    }
+  );
+}
 
 // Option 3: MySQL (uncomment if using MySQL)
 /*
