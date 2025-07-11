@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
-const redis = require('redis');
+const { Redis } = require('@upstash/redis');
 require('dotenv').config();
 
 const app = express();
@@ -20,27 +20,19 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD || 'taskpass',
 });
 
-// Redis connection
-const redisClient = redis.createClient({
-  host: process.env.REDIS_HOST || 'localhost',
-  port: process.env.REDIS_PORT || 6379,
-});
-
-// Redis connection handling
-redisClient.on('connect', () => {
-  console.log('✅ Connected to Redis');
-});
-
-redisClient.on('error', (err) => {
-  console.error('❌ Redis connection error:', err);
+// Upstash Redis connection
+const redisClient = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
 // Initialize Redis connection
 const initRedis = async () => {
   try {
-    await redisClient.connect();
+    await redisClient.ping();
+    console.log('✅ Connected to Upstash Redis');
   } catch (error) {
-    console.error('Failed to connect to Redis:', error);
+    console.error('Failed to connect to Upstash Redis:', error);
   }
 };
 
@@ -210,7 +202,7 @@ app.get('/api/tasks', async (req, res) => {
     const tasks = result.rows;
     
     // Cache the result
-    await redisClient.setEx(CACHE_KEYS.ALL_TASKS, CACHE_TTL, JSON.stringify(tasks));
+    await redisClient.setex(CACHE_KEYS.ALL_TASKS, CACHE_TTL, JSON.stringify(tasks));
     console.log('💾 Tasks cached in Redis');
     
     res.json(tasks);
@@ -248,7 +240,7 @@ app.get('/api/tasks/:id', async (req, res) => {
     const task = result.rows[0];
     
     // Cache the task
-    await redisClient.setEx(cacheKey, CACHE_TTL, JSON.stringify(task));
+    await redisClient.setex(cacheKey, CACHE_TTL, JSON.stringify(task));
     console.log(`💾 Task ${id} cached in Redis`);
     
     res.json(task);
@@ -407,7 +399,7 @@ app.post('/api/tasks/search', async (req, res) => {
     const results = searchResult.rows;
     
     // Cache the search results
-    await redisClient.setEx(cacheKey, CACHE_TTL, JSON.stringify(results));
+    await redisClient.setex(cacheKey, CACHE_TTL, JSON.stringify(results));
     console.log(`💾 Search results for "${searchQuery}" cached in Redis`);
     
     res.json(results);
@@ -435,7 +427,7 @@ app.post('/api/tasks/search', async (req, res) => {
 // Clear all caches (useful for debugging)
 app.delete('/api/cache', async (req, res) => {
   try {
-    await redisClient.flushAll();
+    await redisClient.flushall();
     console.log('🗑️ All Redis caches cleared');
     res.json({ message: 'All caches cleared successfully' });
   } catch (error) {
@@ -447,11 +439,11 @@ app.delete('/api/cache', async (req, res) => {
 // Get cache statistics
 app.get('/api/cache/stats', async (req, res) => {
   try {
-    const info = await redisClient.info('memory');
-    const keyCount = await redisClient.dbSize();
+    const info = await redisClient.info();
+    const keyCount = await redisClient.dbsize();
     
     res.json({
-      connected: redisClient.isReady,
+      connected: true,
       keyCount,
       memoryInfo: info
     });
@@ -476,12 +468,8 @@ app.use((req, res) => {
 process.on('SIGINT', async () => {
   console.log('\n🔄 Shutting down gracefully...');
   
-  try {
-    await redisClient.quit();
-    console.log('✅ Redis connection closed');
-  } catch (error) {
-    console.error('Error closing Redis connection:', error);
-  }
+  // Note: Upstash Redis SDK doesn't need explicit close method
+  console.log('✅ Redis connection closed');
   
   try {
     await pool.end();
