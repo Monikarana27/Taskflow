@@ -7,8 +7,16 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
-app.use(cors());
+// Middleware - UPDATED CORS configuration
+app.use(cors({
+  origin: [
+    'https://taskflow-1-oq08.onrender.com',  // Your frontend URL
+    'http://localhost:3000'  // For local development
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
 // PostgreSQL connection - FIXED VERSION
@@ -95,7 +103,7 @@ const testDbConnection = async () => {
   }
 };
 
-// Initialize database and add sample data
+// UPDATED: Initialize database with priority column
 const initializeDatabase = async () => {
   try {
     // First check if the table exists
@@ -111,13 +119,14 @@ const initializeDatabase = async () => {
       console.log('📋 Tasks table does not exist, attempting to create...');
       
       try {
-        // Create tasks table if it doesn't exist
+        // Create tasks table with priority column
         await pool.query(`
           CREATE TABLE IF NOT EXISTS tasks (
             id SERIAL PRIMARY KEY,
             title VARCHAR(255) NOT NULL,
             description TEXT,
-            status VARCHAR(50) DEFAULT 'todo',
+            status VARCHAR(50) DEFAULT 'pending',
+            priority VARCHAR(20) DEFAULT 'medium',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
           )
@@ -131,6 +140,28 @@ const initializeDatabase = async () => {
       }
     } else {
       console.log('✅ Tasks table already exists');
+      
+      // Check if priority column exists, if not add it
+      try {
+        const priorityColumnExists = await pool.query(`
+          SELECT EXISTS (
+            SELECT FROM information_schema.columns 
+            WHERE table_schema = 'public' 
+            AND table_name = 'tasks' 
+            AND column_name = 'priority'
+          );
+        `);
+        
+        if (!priorityColumnExists.rows[0].exists) {
+          console.log('📋 Adding priority column to tasks table...');
+          await pool.query(`
+            ALTER TABLE tasks ADD COLUMN priority VARCHAR(20) DEFAULT 'medium'
+          `);
+          console.log('✅ Priority column added successfully');
+        }
+      } catch (alterError) {
+        console.error('❌ Error adding priority column:', alterError.message);
+      }
     }
     
     // Check if table has data and add sample data if empty
@@ -138,12 +169,12 @@ const initializeDatabase = async () => {
       const result = await pool.query('SELECT COUNT(*) FROM tasks');
       if (result.rows[0].count === '0') {
         await pool.query(`
-          INSERT INTO tasks (title, description, status) VALUES
-          ('Finish report', 'Complete Q3 summary', 'todo'),
-          ('Team meeting', 'Discuss project goals', 'done'),
-          ('Buy groceries', 'Milk, eggs, bread', 'todo'),
-          ('Exercise routine', 'Go for a 30-minute run', 'in progress'),
-          ('Read documentation', 'Study React hooks and state management', 'todo')
+          INSERT INTO tasks (title, description, status, priority) VALUES
+          ('Finish report', 'Complete Q3 summary', 'pending', 'high'),
+          ('Team meeting', 'Discuss project goals', 'completed', 'medium'),
+          ('Buy groceries', 'Milk, eggs, bread', 'pending', 'low'),
+          ('Exercise routine', 'Go for a 30-minute run', 'in_progress', 'medium'),
+          ('Read documentation', 'Study React hooks and state management', 'pending', 'high')
         `);
         console.log('✅ Sample data inserted');
       } else {
@@ -209,7 +240,7 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Get all tasks with Redis caching
+// UPDATED: Get all tasks with priority column
 app.get('/api/tasks', async (req, res) => {
   try {
     // Try to get from cache first
@@ -223,7 +254,7 @@ app.get('/api/tasks', async (req, res) => {
     // If not in cache, get from database
     console.log('🔍 Fetching tasks from database');
     const result = await pool.query(`
-      SELECT id, title, description, status, created_at, updated_at 
+      SELECT id, title, description, status, priority, created_at, updated_at 
       FROM tasks 
       ORDER BY created_at DESC
     `);
@@ -241,7 +272,7 @@ app.get('/api/tasks', async (req, res) => {
   }
 });
 
-// Get single task by ID with caching
+// UPDATED: Get single task by ID with priority
 app.get('/api/tasks/:id', async (req, res) => {
   const { id } = req.params;
   const cacheKey = getTaskCacheKey(id);
@@ -257,7 +288,7 @@ app.get('/api/tasks/:id', async (req, res) => {
     
     // Get from database
     const result = await pool.query(`
-      SELECT id, title, description, status, created_at, updated_at 
+      SELECT id, title, description, status, priority, created_at, updated_at 
       FROM tasks 
       WHERE id = $1
     `, [id]);
@@ -279,9 +310,9 @@ app.get('/api/tasks/:id', async (req, res) => {
   }
 });
 
-// Create new task
+// UPDATED: Create new task with priority
 app.post('/api/tasks', async (req, res) => {
-  const { title, description, status = 'todo' } = req.body;
+  const { title, description, status = 'pending', priority = 'medium' } = req.body;
   
   if (!title || !title.trim()) {
     return res.status(400).json({ error: 'Task title is required' });
@@ -289,10 +320,10 @@ app.post('/api/tasks', async (req, res) => {
   
   try {
     const result = await pool.query(`
-      INSERT INTO tasks (title, description, status, created_at, updated_at)
-      VALUES ($1, $2, $3, NOW(), NOW())
-      RETURNING id, title, description, status, created_at, updated_at
-    `, [title.trim(), description?.trim() || '', status]);
+      INSERT INTO tasks (title, description, status, priority, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, NOW(), NOW())
+      RETURNING id, title, description, status, priority, created_at, updated_at
+    `, [title.trim(), description?.trim() || '', status, priority]);
     
     const newTask = result.rows[0];
     
@@ -307,10 +338,10 @@ app.post('/api/tasks', async (req, res) => {
   }
 });
 
-// Update task
+// UPDATED: Update task with priority
 app.put('/api/tasks/:id', async (req, res) => {
   const { id } = req.params;
-  const { title, description, status } = req.body;
+  const { title, description, status, priority } = req.body;
   
   try {
     // Build dynamic update query
@@ -336,6 +367,12 @@ app.put('/api/tasks/:id', async (req, res) => {
       paramCount++;
     }
     
+    if (priority !== undefined) {
+      updates.push(`priority = $${paramCount}`);
+      values.push(priority);
+      paramCount++;
+    }
+    
     if (updates.length === 0) {
       return res.status(400).json({ error: 'No valid fields to update' });
     }
@@ -347,7 +384,7 @@ app.put('/api/tasks/:id', async (req, res) => {
       UPDATE tasks 
       SET ${updates.join(', ')} 
       WHERE id = $${paramCount}
-      RETURNING id, title, description, status, created_at, updated_at
+      RETURNING id, title, description, status, priority, created_at, updated_at
     `;
     
     const result = await pool.query(query, values);
@@ -393,63 +430,87 @@ app.delete('/api/tasks/:id', async (req, res) => {
   }
 });
 
-// Search tasks with caching
-app.post('/api/tasks/search', async (req, res) => {
-  const { query, limit = 10 } = req.body;
-  
-  if (!query || !query.trim()) {
-    return res.status(400).json({ error: 'Search query is required' });
-  }
-  
-  const searchQuery = query.trim().toLowerCase();
-  const cacheKey = getSearchCacheKey(searchQuery);
+// UPDATED: Search tasks - both GET and POST methods for frontend compatibility
+app.get('/api/tasks/search', async (req, res) => {
+  const { q: query, status, priority, limit = 10 } = req.query;
   
   try {
-    // Try cache first
-    const cachedResults = await redisClient.get(cacheKey);
+    let searchQuery = `
+      SELECT id, title, description, status, priority, created_at, updated_at
+      FROM tasks 
+      WHERE 1=1
+    `;
+    const values = [];
+    let paramCount = 1;
     
-    if (cachedResults) {
-      console.log(`🔍 Serving search results for "${searchQuery}" from Redis cache`);
-      return res.json(JSON.parse(cachedResults));
+    if (query && query.trim()) {
+      searchQuery += ` AND (LOWER(title) LIKE LOWER($${paramCount}) OR LOWER(description) LIKE LOWER($${paramCount}))`;
+      values.push(`%${query.trim()}%`);
+      paramCount++;
     }
     
-    // Search in database (simple text search for now)
-    const searchResult = await pool.query(`
-      SELECT id, title, description, status, created_at, updated_at,
-             ts_rank(to_tsvector('english', title || ' ' || COALESCE(description, '')), 
-                     plainto_tsquery('english', $1)) as rank
-      FROM tasks 
-      WHERE to_tsvector('english', title || ' ' || COALESCE(description, '')) 
-            @@ plainto_tsquery('english', $1)
-      ORDER BY rank DESC, created_at DESC
-      LIMIT $2
-    `, [searchQuery, limit]);
+    if (status && status !== 'all') {
+      searchQuery += ` AND status = $${paramCount}`;
+      values.push(status);
+      paramCount++;
+    }
     
-    const results = searchResult.rows;
+    if (priority && priority !== 'all') {
+      searchQuery += ` AND priority = $${paramCount}`;
+      values.push(priority);
+      paramCount++;
+    }
     
-    // Cache the search results
-    await redisClient.setex(cacheKey, CACHE_TTL, JSON.stringify(results));
-    console.log(`💾 Search results for "${searchQuery}" cached in Redis`);
+    searchQuery += ` ORDER BY created_at DESC LIMIT $${paramCount}`;
+    values.push(parseInt(limit));
     
-    res.json(results);
+    const result = await pool.query(searchQuery, values);
+    res.json(result.rows);
   } catch (error) {
     console.error('Error searching tasks:', error);
+    res.status(500).json({ error: 'Failed to search tasks' });
+  }
+});
+
+// Keep the POST method for backward compatibility
+app.post('/api/tasks/search', async (req, res) => {
+  const { query, status, priority, limit = 10 } = req.body;
+  
+  try {
+    let searchQuery = `
+      SELECT id, title, description, status, priority, created_at, updated_at
+      FROM tasks 
+      WHERE 1=1
+    `;
+    const values = [];
+    let paramCount = 1;
     
-    // Fallback to simple LIKE search if full-text search fails
-    try {
-      const fallbackResult = await pool.query(`
-        SELECT id, title, description, status, created_at, updated_at
-        FROM tasks 
-        WHERE LOWER(title) LIKE LOWER($1) OR LOWER(description) LIKE LOWER($1)
-        ORDER BY created_at DESC
-        LIMIT $2
-      `, [`%${searchQuery}%`, limit]);
-      
-      res.json(fallbackResult.rows);
-    } catch (fallbackError) {
-      console.error('Fallback search also failed:', fallbackError);
-      res.status(500).json({ error: 'Failed to search tasks' });
+    if (query && query.trim()) {
+      searchQuery += ` AND (LOWER(title) LIKE LOWER($${paramCount}) OR LOWER(description) LIKE LOWER($${paramCount}))`;
+      values.push(`%${query.trim()}%`);
+      paramCount++;
     }
+    
+    if (status && status !== 'all') {
+      searchQuery += ` AND status = $${paramCount}`;
+      values.push(status);
+      paramCount++;
+    }
+    
+    if (priority && priority !== 'all') {
+      searchQuery += ` AND priority = $${paramCount}`;
+      values.push(priority);
+      paramCount++;
+    }
+    
+    searchQuery += ` ORDER BY created_at DESC LIMIT $${paramCount}`;
+    values.push(parseInt(limit));
+    
+    const result = await pool.query(searchQuery, values);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error searching tasks:', error);
+    res.status(500).json({ error: 'Failed to search tasks' });
   }
 });
 
