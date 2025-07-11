@@ -2,37 +2,84 @@ import React, { useState, useEffect } from 'react';
 import { Plus, Search, Moon, Sun, Filter, MoreHorizontal, Trash2, CheckCircle2, Clock, AlertCircle } from 'lucide-react';
 import './App.css';
 
-// Custom hook for caching - COPIED FROM FIRST CODE
-const useTaskCache = () => {
-  const CACHE_KEY = 'tasks';
-  
-  const getCachedTasks = () => {
+// API configuration
+const API_BASE_URL = 'https://taskflow-ljzo.onrender.com';
+
+// API service functions
+const api = {
+  async getTasks() {
     try {
-      const cached = localStorage.getItem(CACHE_KEY);
-      return cached ? JSON.parse(cached) : null;
+      const response = await fetch(`${API_BASE_URL}/api/tasks`);
+      if (!response.ok) throw new Error('Failed to fetch tasks');
+      return await response.json();
     } catch (error) {
-      console.error('Error reading from cache:', error);
-      return null;
+      console.error('Error fetching tasks:', error);
+      throw error;
     }
-  };
-  
-  const setCachedTasks = (tasks) => {
+  },
+
+  async createTask(task) {
     try {
-      localStorage.setItem(CACHE_KEY, JSON.stringify(tasks));
+      const response = await fetch(`${API_BASE_URL}/api/tasks`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(task),
+      });
+      if (!response.ok) throw new Error('Failed to create task');
+      return await response.json();
     } catch (error) {
-      console.error('Error writing to cache:', error);
+      console.error('Error creating task:', error);
+      throw error;
     }
-  };
-  
-  const clearCache = () => {
+  },
+
+  async updateTask(id, updates) {
     try {
-      localStorage.removeItem(CACHE_KEY);
+      const response = await fetch(`${API_BASE_URL}/api/tasks/${id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(updates),
+      });
+      if (!response.ok) throw new Error('Failed to update task');
+      return await response.json();
     } catch (error) {
-      console.error('Error clearing cache:', error);
+      console.error('Error updating task:', error);
+      throw error;
     }
-  };
-  
-  return { getCachedTasks, setCachedTasks, clearCache };
+  },
+
+  async deleteTask(id) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/tasks/${id}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) throw new Error('Failed to delete task');
+      return await response.json();
+    } catch (error) {
+      console.error('Error deleting task:', error);
+      throw error;
+    }
+  },
+
+  async searchTasks(query, status, priority) {
+    try {
+      const params = new URLSearchParams();
+      if (query) params.append('q', query);
+      if (status && status !== 'all') params.append('status', status);
+      if (priority && priority !== 'all') params.append('priority', priority);
+      
+      const response = await fetch(`${API_BASE_URL}/api/tasks/search?${params}`);
+      if (!response.ok) throw new Error('Failed to search tasks');
+      return await response.json();
+    } catch (error) {
+      console.error('Error searching tasks:', error);
+      throw error;
+    }
+  }
 };
 
 // Custom hook for theme management
@@ -55,111 +102,88 @@ const useTheme = () => {
   return { theme, toggleTheme };
 };
 
-// Custom hook for task management with localStorage persistence
+// Custom hook for task management with API integration
 const useTaskManager = () => {
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  
-  const { getCachedTasks, setCachedTasks, clearCache } = useTaskCache();
 
-  // Initial sample tasks
-  const initialTasks = [
-    { id: 1, title: 'Design new landing page', description: 'Create wireframes and mockups for the new product landing page', status: 'in progress', created_at: '2024-06-01', priority: 'high' },
-    { id: 2, title: 'Review team proposals', description: 'Go through the quarterly planning proposals from each team member', status: 'todo', created_at: '2024-06-02', priority: 'medium' },
-    { id: 3, title: 'Update documentation', description: 'Revise API documentation with latest changes', status: 'done', created_at: '2024-05-28', priority: 'low' },
-    { id: 4, title: 'Client meeting preparation', description: 'Prepare presentation slides for quarterly review', status: 'todo', created_at: '2024-06-03', priority: 'high' }
-  ];
+  // Load tasks from API
+  const loadTasks = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const tasksData = await api.getTasks();
+      setTasks(tasksData);
+    } catch (err) {
+      setError('Failed to load tasks');
+      console.error('Error loading tasks:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  // Load tasks from cache or use initial tasks
+  // Initial load
   useEffect(() => {
-    const loadTasks = () => {
-      try {
-        setLoading(true);
-        setError(null);
-        
-        const cachedTasks = getCachedTasks();
-        if (cachedTasks && cachedTasks.length > 0) {
-          setTasks(cachedTasks);
-        } else {
-          // Use initial tasks if no cache exists
-          setTasks(initialTasks);
-          setCachedTasks(initialTasks);
-        }
-      } catch (err) {
-        setError('Failed to load tasks');
-        setTasks(initialTasks);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     loadTasks();
   }, []);
 
   const addTask = async (taskData) => {
-    setLoading(true);
     try {
-      const newTask = {
-        id: Date.now(),
-        ...taskData,
-        created_at: new Date().toISOString().split('T')[0],
-        priority: taskData.priority || 'medium'
-      };
-      const updatedTasks = [newTask, ...tasks];
-      setTasks(updatedTasks);
-      setCachedTasks(updatedTasks); // Save to cache
+      setLoading(true);
       setError(null);
+      const newTask = await api.createTask(taskData);
+      setTasks(prevTasks => [newTask, ...prevTasks]);
     } catch (err) {
       setError('Failed to add task');
+      console.error('Error adding task:', err);
     } finally {
       setLoading(false);
     }
   };
 
   const updateTask = async (id, updates) => {
-    setLoading(true);
     try {
-      const updatedTasks = tasks.map(task => 
-        task.id === id ? { ...task, ...updates } : task
-      );
-      setTasks(updatedTasks);
-      setCachedTasks(updatedTasks); // Save to cache
+      setLoading(true);
       setError(null);
+      const updatedTask = await api.updateTask(id, updates);
+      setTasks(prevTasks => 
+        prevTasks.map(task => 
+          task.id === id ? updatedTask : task
+        )
+      );
     } catch (err) {
       setError('Failed to update task');
+      console.error('Error updating task:', err);
     } finally {
       setLoading(false);
     }
   };
 
   const deleteTask = async (id) => {
-    setLoading(true);
     try {
-      const updatedTasks = tasks.filter(task => task.id !== id);
-      setTasks(updatedTasks);
-      setCachedTasks(updatedTasks); // Save to cache
+      setLoading(true);
       setError(null);
+      await api.deleteTask(id);
+      setTasks(prevTasks => prevTasks.filter(task => task.id !== id));
     } catch (err) {
       setError('Failed to delete task');
+      console.error('Error deleting task:', err);
     } finally {
       setLoading(false);
     }
   };
 
-  // Manual cache refresh
-  const refreshCache = () => {
-    clearCache();
-    setTasks(initialTasks);
-    setCachedTasks(initialTasks);
+  const refreshTasks = () => {
+    loadTasks();
   };
 
-  return { tasks, loading, error, addTask, updateTask, deleteTask, refreshCache };
+  return { tasks, loading, error, addTask, updateTask, deleteTask, refreshTasks };
 };
 
 function App() {
   const { theme, toggleTheme } = useTheme();
-  const { tasks, loading, error, addTask, updateTask, deleteTask, refreshCache } = useTaskManager();
+  const { tasks, loading, error, addTask, updateTask, deleteTask, refreshTasks } = useTaskManager();
   
   const [newTask, setNewTask] = useState({ title: '', description: '', priority: 'medium' });
   const [searchQuery, setSearchQuery] = useState('');
@@ -179,9 +203,9 @@ function App() {
   // Task statistics
   const stats = {
     total: tasks.length,
-    completed: tasks.filter(t => t.status === 'done').length,
-    inProgress: tasks.filter(t => t.status === 'in progress').length,
-    todo: tasks.filter(t => t.status === 'todo').length
+    completed: tasks.filter(t => t.status === 'completed').length,
+    inProgress: tasks.filter(t => t.status === 'in_progress').length,
+    todo: tasks.filter(t => t.status === 'pending').length
   };
 
   const handleAddTask = async (e) => {
@@ -204,14 +228,14 @@ function App() {
 
   const getStatusIcon = (status) => {
     switch (status) {
-      case 'done': return <CheckCircle2 className="w-5 h-5 text-green-500" />;
-      case 'in progress': return <Clock className="w-5 h-5 text-blue-500" />;
-      case 'todo': return <AlertCircle className="w-5 h-5 text-gray-400" />;
+      case 'completed': return <CheckCircle2 className="w-5 h-5 text-green-500" />;
+      case 'in_progress': return <Clock className="w-5 h-5 text-blue-500" />;
+      case 'pending': return <AlertCircle className="w-5 h-5 text-gray-400" />;
       default: return null;
     }
   };
 
-  if (loading) {
+  if (loading && tasks.length === 0) {
     return (
       <div className="app">
         <div className="loading">Loading tasks...</div>
@@ -229,8 +253,8 @@ function App() {
             <p className="app-subtitle">Organize your work, amplify your productivity</p>
           </div>
           <div className="header-actions">
-            <button onClick={refreshCache} className="refresh-btn">
-              🔄 Refresh Cache
+            <button onClick={refreshTasks} className="refresh-btn" disabled={loading}>
+              🔄 {loading ? 'Loading...' : 'Refresh'}
             </button>
             <button onClick={toggleTheme} className="theme-toggle">
               {theme === 'light' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
@@ -308,9 +332,9 @@ function App() {
               className="filter-select"
             >
               <option value="all">All Status</option>
-              <option value="todo">To Do</option>
-              <option value="in progress">In Progress</option>
-              <option value="done">Completed</option>
+              <option value="pending">Pending</option>
+              <option value="in_progress">In Progress</option>
+              <option value="completed">Completed</option>
             </select>
           </div>
           
@@ -427,6 +451,7 @@ function App() {
                       onClick={() => deleteTask(task.id)}
                       className="action-btn delete-btn"
                       aria-label="Delete task"
+                      disabled={loading}
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -447,10 +472,11 @@ function App() {
                       value={task.status}
                       onChange={(e) => updateTask(task.id, { status: e.target.value })}
                       className="status-select"
+                      disabled={loading}
                     >
-                      <option value="todo">To Do</option>
-                      <option value="in progress">In Progress</option>
-                      <option value="done">Done</option>
+                      <option value="pending">Pending</option>
+                      <option value="in_progress">In Progress</option>
+                      <option value="completed">Completed</option>
                     </select>
                   </div>
                   
