@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const { Redis } = require('@upstash/redis');
+const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 
 const app = express();
@@ -15,15 +16,14 @@ app.use(cors({
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Id']
 }));
 app.use(express.json());
 
-// PostgreSQL connection - FIXED VERSION
+// PostgreSQL connection
 let pool;
 
 if (process.env.DATABASE_URL) {
-  // Use DATABASE_URL (for Render, Heroku, etc.)
   console.log('🔄 Using DATABASE_URL for PostgreSQL connection');
   pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -33,9 +33,7 @@ if (process.env.DATABASE_URL) {
     }
   });
 } else {
-  // Use individual environment variables (for local development)
   console.log('🔄 Using individual environment variables for PostgreSQL');
-  console.log('🔍 DB_HOST:', process.env.DB_HOST || 'localhost');
   pool = new Pool({
     host: process.env.DB_HOST || 'localhost',
     port: process.env.DB_PORT || 5432,
@@ -64,32 +62,56 @@ const initRedis = async () => {
 // Cache configuration
 const CACHE_TTL = 300; // 5 minutes in seconds
 const CACHE_KEYS = {
-  ALL_TASKS: 'tasks:all',
+  USER_TASKS: 'user_tasks:',
   TASK_BY_ID: 'task:',
-  SEARCH_RESULTS: 'search:'
+  USER_SESSION: 'session:'
 };
+
+// Helper function to get cache key for user tasks
+const getUserTasksCacheKey = (userId) => `${CACHE_KEYS.USER_TASKS}${userId}`;
 
 // Helper function to get cache key for task by ID
 const getTaskCacheKey = (id) => `${CACHE_KEYS.TASK_BY_ID}${id}`;
 
-// Helper function to get cache key for search
-const getSearchCacheKey = (query) => `${CACHE_KEYS.SEARCH_RESULTS}${query.toLowerCase()}`;
+// Helper function to get user session cache key
+const getUserSessionCacheKey = (userId) => `${CACHE_KEYS.USER_SESSION}${userId}`;
 
-// Cache invalidation helper
-const invalidateTaskCaches = async () => {
+// Cache invalidation helper - only for specific user
+const invalidateUserTaskCaches = async (userId) => {
   try {
-    const keys = await redisClient.keys('tasks:*');
-    if (keys.length > 0) {
-      await redisClient.del(keys);
+    const userTasksKey = getUserTasksCacheKey(userId);
+    await redisClient.del(userTasksKey);
+    console.log(`🗑️ User ${userId} task cache invalidated`);
+  } catch (error) {
+    console.error('Error invalidating user cache:', error);
+  }
+};
+
+// Middleware to handle user sessions
+const handleUserSession = async (req, res, next) => {
+  try {
+    let userId = req.headers['x-user-id'];
+    
+    if (!userId) {
+      // Generate new user ID if not provided
+      userId = uuidv4();
+      res.setHeader('X-User-Id', userId);
     }
     
-    // Also clear search caches as they might be outdated
-    const searchKeys = await redisClient.keys('search:*');
-    if (searchKeys.length > 0) {
-      await redisClient.del(searchKeys);
-    }
+    // Store user session in Redis (optional - for tracking active users)
+    const sessionKey = getUserSessionCacheKey(userId);
+    await redisClient.setex(sessionKey, 3600, { // 1 hour session
+      lastActivity: new Date().toISOString(),
+      userAgent: req.headers['user-agent'] || 'unknown'
+    });
+    
+    req.userId = userId;
+    next();
   } catch (error) {
-    console.error('Error invalidating cache:', error);
+    console.error('Error handling user session:', error);
+    // Continue without session if Redis fails
+    req.userId = req.headers['x-user-id'] || uuidv4();
+    next();
   }
 };
 
@@ -103,10 +125,10 @@ const testDbConnection = async () => {
   }
 };
 
-// UPDATED: Initialize database with priority column
+// UPDATED: Initialize database with user_id column
 const initializeDatabase = async () => {
   try {
-    // First check if the table exists
+    // Check if the table exists
     const tableExists = await pool.query(`
       SELECT EXISTS (
         SELECT FROM information_schema.tables 
@@ -116,30 +138,58 @@ const initializeDatabase = async () => {
     `);
 
     if (!tableExists.rows[0].exists) {
-      console.log('📋 Tasks table does not exist, attempting to create...');
+      console.log('📋 Tasks table does not exist, creating...');
       
-      try {
-        // Create tasks table with priority column
-        await pool.query(`
-          CREATE TABLE IF NOT EXISTS tasks (
-            id SERIAL PRIMARY KEY,
-            title VARCHAR(255) NOT NULL,
-            description TEXT,
-            status VARCHAR(50) DEFAULT 'pending',
-            priority VARCHAR(20) DEFAULT 'medium',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          )
-        `);
-        console.log('✅ Database table created successfully');
-      } catch (createError) {
-        console.error('❌ Error creating table:', createError.message);
-        console.log('💡 Please create the table manually using the SQL commands provided');
-        console.log('   Or ask your database administrator to grant CREATE permissions');
-        return; // Exit early if table creation fails
-      }
+      // Create tasks table with user_id column
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS tasks (
+          id SERIAL PRIMARY KEY,
+          user_id VARCHAR(255) NOT NULL,
+          title VARCHAR(255) NOT NULL,
+          description TEXT,
+          status VARCHAR(50) DEFAULT 'pending',
+          priority VARCHAR(20) DEFAULT 'medium',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      
+      // Create index on user_id for better performance
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)
+      `);
+      
+      console.log('✅ Database table created successfully');
     } else {
       console.log('✅ Tasks table already exists');
+      
+      // Check if user_id column exists, if not add it
+      try {
+        const userIdColumnExists = await pool.query(`
+          SELECT EXISTS (
+            SELECT FROM information_schema.columns 
+            WHERE table_schema = 'public' 
+            AND table_name = 'tasks' 
+            AND column_name = 'user_id'
+          );
+        `);
+        
+        if (!userIdColumnExists.rows[0].exists) {
+          console.log('📋 Adding user_id column to tasks table...');
+          await pool.query(`
+            ALTER TABLE tasks ADD COLUMN user_id VARCHAR(255) NOT NULL DEFAULT 'legacy_user'
+          `);
+          
+          // Create index on user_id
+          await pool.query(`
+            CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)
+          `);
+          
+          console.log('✅ User_id column added successfully');
+        }
+      } catch (alterError) {
+        console.error('❌ Error adding user_id column:', alterError.message);
+      }
       
       // Check if priority column exists, if not add it
       try {
@@ -164,48 +214,19 @@ const initializeDatabase = async () => {
       }
     }
     
-    // Check if table has data and add sample data if empty
-    try {
-      const result = await pool.query('SELECT COUNT(*) FROM tasks');
-      if (result.rows[0].count === '0') {
-        await pool.query(`
-          INSERT INTO tasks (title, description, status, priority) VALUES
-          ('Finish report', 'Complete Q3 summary', 'pending', 'high'),
-          ('Team meeting', 'Discuss project goals', 'completed', 'medium'),
-          ('Buy groceries', 'Milk, eggs, bread', 'pending', 'low'),
-          ('Exercise routine', 'Go for a 30-minute run', 'in_progress', 'medium'),
-          ('Read documentation', 'Study React hooks and state management', 'pending', 'high')
-        `);
-        console.log('✅ Sample data inserted');
-      } else {
-        console.log(`✅ Table already contains ${result.rows[0].count} tasks`);
-      }
-    } catch (dataError) {
-      console.error('❌ Error checking/inserting sample data:', dataError.message);
-      // Don't stop the server if sample data insertion fails
-    }
-    
   } catch (error) {
     console.error('❌ Error during database initialization:', error.message);
-    
-    // Test if we can at least read from the table
-    try {
-      await pool.query('SELECT COUNT(*) FROM tasks LIMIT 1');
-      console.log('✅ Tasks table is accessible for reading');
-    } catch (accessError) {
-      console.error('❌ Cannot access tasks table:', accessError.message);
-      console.log('💡 Please ensure the tasks table exists and user has proper permissions');
-    }
   }
 };
 
 // Routes
 
-// Root route - Add this for basic frontend
+// Root route
 app.get('/', (req, res) => {
   res.json({
     message: 'Task Management API',
-    version: '1.0.0',
+    version: '2.0.0',
+    features: ['User Sessions', 'Task Isolation', 'Caching'],
     endpoints: {
       health: '/health',
       tasks: '/api/tasks',
@@ -217,10 +238,7 @@ app.get('/', (req, res) => {
 // Health check endpoint
 app.get('/health', async (req, res) => {
   try {
-    // Test database connection
     await pool.query('SELECT 1');
-    
-    // Test Redis connection
     await redisClient.ping();
     
     res.json({ 
@@ -240,30 +258,34 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// FIXED: Get all tasks with priority column
-app.get('/api/tasks', async (req, res) => {
+// UPDATED: Get all tasks for specific user
+app.get('/api/tasks', handleUserSession, async (req, res) => {
   try {
+    const userId = req.userId;
+    const cacheKey = getUserTasksCacheKey(userId);
+    
     // Try to get from cache first
-    const cachedTasks = await redisClient.get(CACHE_KEYS.ALL_TASKS);
+    const cachedTasks = await redisClient.get(cacheKey);
     
     if (cachedTasks) {
-      console.log('📋 Serving tasks from Redis cache');
+      console.log(`📋 Serving tasks for user ${userId} from Redis cache`);
       return res.json(cachedTasks);
     }
     
     // If not in cache, get from database
-    console.log('🔍 Fetching tasks from database');
+    console.log(`🔍 Fetching tasks for user ${userId} from database`);
     const result = await pool.query(`
       SELECT id, title, description, status, priority, created_at, updated_at 
       FROM tasks 
+      WHERE user_id = $1
       ORDER BY created_at DESC
-    `);
+    `, [userId]);
     
     const tasks = result.rows;
     
     // Cache the result
-    await redisClient.setex(CACHE_KEYS.ALL_TASKS, CACHE_TTL, tasks);
-    console.log('💾 Tasks cached in Redis');
+    await redisClient.setex(cacheKey, CACHE_TTL, tasks);
+    console.log(`💾 Tasks for user ${userId} cached in Redis`);
     
     res.json(tasks);
   } catch (error) {
@@ -272,47 +294,33 @@ app.get('/api/tasks', async (req, res) => {
   }
 });
 
-// FIXED: Get single task by ID with priority
-app.get('/api/tasks/:id', async (req, res) => {
+// UPDATED: Get single task by ID (with user ownership check)
+app.get('/api/tasks/:id', handleUserSession, async (req, res) => {
   const { id } = req.params;
-  const cacheKey = getTaskCacheKey(id);
+  const userId = req.userId;
   
   try {
-    // Try cache first
-    const cachedTask = await redisClient.get(cacheKey);
-    
-    if (cachedTask) {
-      console.log(`📋 Serving task ${id} from Redis cache`);
-      return res.json(cachedTask);
-    }
-    
-    // Get from database
     const result = await pool.query(`
       SELECT id, title, description, status, priority, created_at, updated_at 
       FROM tasks 
-      WHERE id = $1
-    `, [id]);
+      WHERE id = $1 AND user_id = $2
+    `, [id, userId]);
     
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Task not found' });
     }
     
-    const task = result.rows[0];
-    
-    // Cache the task
-    await redisClient.setex(cacheKey, CACHE_TTL, task);
-    console.log(`💾 Task ${id} cached in Redis`);
-    
-    res.json(task);
+    res.json(result.rows[0]);
   } catch (error) {
     console.error('Error fetching task:', error);
     res.status(500).json({ error: 'Failed to fetch task' });
   }
 });
 
-// UPDATED: Create new task with priority
-app.post('/api/tasks', async (req, res) => {
+// UPDATED: Create new task with user association
+app.post('/api/tasks', handleUserSession, async (req, res) => {
   const { title, description, status = 'pending', priority = 'medium' } = req.body;
+  const userId = req.userId;
   
   if (!title || !title.trim()) {
     return res.status(400).json({ error: 'Task title is required' });
@@ -320,16 +328,15 @@ app.post('/api/tasks', async (req, res) => {
   
   try {
     const result = await pool.query(`
-      INSERT INTO tasks (title, description, status, priority, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, NOW(), NOW())
+      INSERT INTO tasks (user_id, title, description, status, priority, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
       RETURNING id, title, description, status, priority, created_at, updated_at
-    `, [title.trim(), description?.trim() || '', status, priority]);
+    `, [userId, title.trim(), description?.trim() || '', status, priority]);
     
     const newTask = result.rows[0];
     
-    // Invalidate caches
-    await invalidateTaskCaches();
-    console.log('🗑️ Task caches invalidated after creation');
+    // Invalidate only this user's cache
+    await invalidateUserTaskCaches(userId);
     
     res.status(201).json(newTask);
   } catch (error) {
@@ -338,16 +345,17 @@ app.post('/api/tasks', async (req, res) => {
   }
 });
 
-// UPDATED: Update task with priority
-app.put('/api/tasks/:id', async (req, res) => {
+// UPDATED: Update task with user ownership check
+app.put('/api/tasks/:id', handleUserSession, async (req, res) => {
   const { id } = req.params;
   const { title, description, status, priority } = req.body;
+  const userId = req.userId;
   
   try {
     // Build dynamic update query
     const updates = [];
-    const values = [];
-    let paramCount = 1;
+    const values = [userId, id]; // user_id first, then id
+    let paramCount = 3; // Start from 3 since we have user_id and id
     
     if (title !== undefined) {
       updates.push(`title = $${paramCount}`);
@@ -378,12 +386,11 @@ app.put('/api/tasks/:id', async (req, res) => {
     }
     
     updates.push(`updated_at = NOW()`);
-    values.push(id);
     
     const query = `
       UPDATE tasks 
       SET ${updates.join(', ')} 
-      WHERE id = $${paramCount}
+      WHERE user_id = $1 AND id = $2
       RETURNING id, title, description, status, priority, created_at, updated_at
     `;
     
@@ -395,10 +402,8 @@ app.put('/api/tasks/:id', async (req, res) => {
     
     const updatedTask = result.rows[0];
     
-    // Invalidate caches
-    await invalidateTaskCaches();
-    await redisClient.del(getTaskCacheKey(id));
-    console.log(`🗑️ Task caches invalidated after update of task ${id}`);
+    // Invalidate only this user's cache
+    await invalidateUserTaskCaches(userId);
     
     res.json(updatedTask);
   } catch (error) {
@@ -407,21 +412,23 @@ app.put('/api/tasks/:id', async (req, res) => {
   }
 });
 
-// Delete task
-app.delete('/api/tasks/:id', async (req, res) => {
+// UPDATED: Delete task with user ownership check
+app.delete('/api/tasks/:id', handleUserSession, async (req, res) => {
   const { id } = req.params;
+  const userId = req.userId;
   
   try {
-    const result = await pool.query('DELETE FROM tasks WHERE id = $1 RETURNING id', [id]);
+    const result = await pool.query(
+      'DELETE FROM tasks WHERE id = $1 AND user_id = $2 RETURNING id', 
+      [id, userId]
+    );
     
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Task not found' });
     }
     
-    // Invalidate caches
-    await invalidateTaskCaches();
-    await redisClient.del(getTaskCacheKey(id));
-    console.log(`🗑️ Task caches invalidated after deletion of task ${id}`);
+    // Invalidate only this user's cache
+    await invalidateUserTaskCaches(userId);
     
     res.json({ message: 'Task deleted successfully', id: parseInt(id) });
   } catch (error) {
@@ -430,18 +437,19 @@ app.delete('/api/tasks/:id', async (req, res) => {
   }
 });
 
-// UPDATED: Search tasks - both GET and POST methods for frontend compatibility
-app.get('/api/tasks/search', async (req, res) => {
+// UPDATED: Search tasks for specific user
+app.get('/api/tasks/search', handleUserSession, async (req, res) => {
   const { q: query, status, priority, limit = 10 } = req.query;
+  const userId = req.userId;
   
   try {
     let searchQuery = `
       SELECT id, title, description, status, priority, created_at, updated_at
       FROM tasks 
-      WHERE 1=1
+      WHERE user_id = $1
     `;
-    const values = [];
-    let paramCount = 1;
+    const values = [userId];
+    let paramCount = 2;
     
     if (query && query.trim()) {
       searchQuery += ` AND (LOWER(title) LIKE LOWER($${paramCount}) OR LOWER(description) LIKE LOWER($${paramCount}))`;
@@ -472,74 +480,33 @@ app.get('/api/tasks/search', async (req, res) => {
   }
 });
 
-// Keep the POST method for backward compatibility
-app.post('/api/tasks/search', async (req, res) => {
-  const { query, status, priority, limit = 10 } = req.body;
-  
+// Clear user's cache only
+app.delete('/api/cache', handleUserSession, async (req, res) => {
   try {
-    let searchQuery = `
-      SELECT id, title, description, status, priority, created_at, updated_at
-      FROM tasks 
-      WHERE 1=1
-    `;
-    const values = [];
-    let paramCount = 1;
-    
-    if (query && query.trim()) {
-      searchQuery += ` AND (LOWER(title) LIKE LOWER($${paramCount}) OR LOWER(description) LIKE LOWER($${paramCount}))`;
-      values.push(`%${query.trim()}%`);
-      paramCount++;
-    }
-    
-    if (status && status !== 'all') {
-      searchQuery += ` AND status = $${paramCount}`;
-      values.push(status);
-      paramCount++;
-    }
-    
-    if (priority && priority !== 'all') {
-      searchQuery += ` AND priority = $${paramCount}`;
-      values.push(priority);
-      paramCount++;
-    }
-    
-    searchQuery += ` ORDER BY created_at DESC LIMIT $${paramCount}`;
-    values.push(parseInt(limit));
-    
-    const result = await pool.query(searchQuery, values);
-    res.json(result.rows);
+    const userId = req.userId;
+    await invalidateUserTaskCaches(userId);
+    res.json({ message: 'User cache cleared successfully' });
   } catch (error) {
-    console.error('Error searching tasks:', error);
-    res.status(500).json({ error: 'Failed to search tasks' });
-  }
-});
-
-// Clear all caches (useful for debugging)
-app.delete('/api/cache', async (req, res) => {
-  try {
-    await redisClient.flushall();
-    console.log('🗑️ All Redis caches cleared');
-    res.json({ message: 'All caches cleared successfully' });
-  } catch (error) {
-    console.error('Error clearing cache:', error);
+    console.error('Error clearing user cache:', error);
     res.status(500).json({ error: 'Failed to clear cache' });
   }
 });
 
-// Get cache statistics
-app.get('/api/cache/stats', async (req, res) => {
+// Get user session info
+app.get('/api/user/session', handleUserSession, async (req, res) => {
   try {
-    const info = await redisClient.info();
-    const keyCount = await redisClient.dbsize();
+    const userId = req.userId;
+    const sessionKey = getUserSessionCacheKey(userId);
+    const sessionData = await redisClient.get(sessionKey);
     
     res.json({
-      connected: true,
-      keyCount,
-      memoryInfo: info
+      userId,
+      session: sessionData || null,
+      isNewUser: !sessionData
     });
   } catch (error) {
-    console.error('Error getting cache stats:', error);
-    res.status(500).json({ error: 'Failed to get cache statistics' });
+    console.error('Error getting session info:', error);
+    res.status(500).json({ error: 'Failed to get session info' });
   }
 });
 
@@ -558,9 +525,6 @@ app.use((req, res) => {
 process.on('SIGINT', async () => {
   console.log('\n🔄 Shutting down gracefully...');
   
-  // Note: Upstash Redis SDK doesn't need explicit close method
-  console.log('✅ Redis connection closed');
-  
   try {
     await pool.end();
     console.log('✅ PostgreSQL connection closed');
@@ -574,12 +538,10 @@ process.on('SIGINT', async () => {
 // Start server function
 const startServer = async () => {
   try {
-    // Initialize connections
     await testDbConnection();
     await initializeDatabase();
     await initRedis();
     
-    // Start the server
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📡 Health check: http://localhost:${PORT}/health`);
@@ -591,5 +553,4 @@ const startServer = async () => {
   }
 };
 
-// Start the server
 startServer();
