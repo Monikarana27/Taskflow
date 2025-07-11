@@ -1,6 +1,12 @@
 // config/database.js
 const { Sequelize } = require('sequelize');
 
+// DEBUG: Check environment variables
+console.log('🔍 DEBUG: DATABASE_URL exists:', !!process.env.DATABASE_URL);
+console.log('🔍 DEBUG: DATABASE_URL length:', process.env.DATABASE_URL ? process.env.DATABASE_URL.length : 0);
+console.log('🔍 DEBUG: NODE_ENV:', process.env.NODE_ENV);
+console.log('🔍 DEBUG: All env vars starting with DB:', Object.keys(process.env).filter(key => key.startsWith('DB')));
+
 // Option 1: SQLite (for development)
 //const sequelize = new Sequelize({
  // dialect: 'sqlite',
@@ -13,6 +19,7 @@ let sequelize;
 
 if (process.env.DATABASE_URL) {
   // Use DATABASE_URL (typical for Render, Heroku, etc.)
+  console.log('🔄 Using DATABASE_URL connection');
   sequelize = new Sequelize(process.env.DATABASE_URL, {
     dialect: 'postgres',
     dialectOptions: {
@@ -25,6 +32,12 @@ if (process.env.DATABASE_URL) {
   });
 } else {
   // Use individual environment variables (for local development)
+  console.log('🔄 Using individual environment variables');
+  console.log('🔍 DB_HOST:', process.env.DB_HOST || 'localhost');
+  console.log('🔍 DB_PORT:', process.env.DB_PORT || 5432);
+  console.log('🔍 DB_NAME:', process.env.DB_NAME || 'task_management');
+  console.log('🔍 DB_USER:', process.env.DB_USER || 'postgres');
+  
   sequelize = new Sequelize(
     process.env.DB_NAME || 'task_management',
     process.env.DB_USER || 'postgres',
