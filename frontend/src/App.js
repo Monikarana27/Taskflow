@@ -3,13 +3,20 @@ import { Plus, Search, Moon, Sun, Filter, MoreHorizontal, Trash2, CheckCircle2, 
 import './App.css';
 
 // API configuration
+// API configuration
 const API_BASE_URL = 'https://taskflow-ljzo.onrender.com';
 
+// User session management
 // API service functions
 const api = {
   async getTasks() {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/tasks`);
+      const response = await fetch(`${API_BASE_URL}/api/tasks`, {
+        headers: {
+          'X-User-Id': getUserId(),
+          'Content-Type': 'application/json'
+        }
+      });
       if (!response.ok) throw new Error('Failed to fetch tasks');
       return await response.json();
     } catch (error) {
@@ -24,6 +31,7 @@ const api = {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'X-User-Id': getUserId()
         },
         body: JSON.stringify(task),
       });
@@ -41,6 +49,7 @@ const api = {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
+          'X-User-Id': getUserId()
         },
         body: JSON.stringify(updates),
       });
@@ -56,7 +65,47 @@ const api = {
     try {
       const response = await fetch(`${API_BASE_URL}/api/tasks/${id}`, {
         method: 'DELETE',
+        headers: {
+          'X-User-Id': getUserId()
+        }
       });
+      if (!response.ok) throw new Error('Failed to delete task');
+      return await response.json();
+    } catch (error) {
+      console.error('Error deleting task:', error);
+      throw error;
+    }
+  },
+
+  async searchTasks(query, status, priority) {
+    try {
+      const params = new URLSearchParams();
+      if (query) params.append('q', query);
+      if (status && status !== 'all') params.append('status', status);
+      if (priority && priority !== 'all') params.append('priority', priority);
+      
+      const response = await fetch(`${API_BASE_URL}/api/tasks/search?${params}`, {
+        headers: {
+          'X-User-Id': getUserId()
+     // Load tasks from API
+  const loadTasks = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      console.log('Loading tasks for user:', getUserId());
+      const tasksData = await api.getTasks();
+      console.log('Tasks loaded:', tasksData);
+      setTasks(tasksData);
+    } catch (err) {
+      console.error('Error loading tasks:', err);
+      setError(`Failed to load tasks: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+      setLoading(false);
+    }
+  };
       if (!response.ok) throw new Error('Failed to delete task');
       return await response.json();
     } catch (error) {
