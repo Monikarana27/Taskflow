@@ -3,10 +3,18 @@ import { Plus, Search, Moon, Sun, Filter, MoreHorizontal, Trash2, CheckCircle2, 
 import './App.css';
 
 // API configuration
-// API configuration
 const API_BASE_URL = 'https://taskflow-ljzo.onrender.com';
 
 // User session management
+const getUserId = () => {
+  let userId = sessionStorage.getItem('userId');
+  if (!userId) {
+    userId = 'user_' + Math.random().toString(36).substr(2, 9);
+    sessionStorage.setItem('userId', userId);
+  }
+  return userId;
+};
+
 // API service functions
 const api = {
   async getTasks() {
@@ -87,41 +95,8 @@ const api = {
       const response = await fetch(`${API_BASE_URL}/api/tasks/search?${params}`, {
         headers: {
           'X-User-Id': getUserId()
-     // Load tasks from API
-  const loadTasks = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      console.log('Loading tasks for user:', getUserId());
-      const tasksData = await api.getTasks();
-      console.log('Tasks loaded:', tasksData);
-      setTasks(tasksData);
-    } catch (err) {
-      console.error('Error loading tasks:', err);
-      setError(`Failed to load tasks: ${err.message}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-      setLoading(false);
-    }
-  };
-      if (!response.ok) throw new Error('Failed to delete task');
-      return await response.json();
-    } catch (error) {
-      console.error('Error deleting task:', error);
-      throw error;
-    }
-  },
-
-  async searchTasks(query, status, priority) {
-    try {
-      const params = new URLSearchParams();
-      if (query) params.append('q', query);
-      if (status && status !== 'all') params.append('status', status);
-      if (priority && priority !== 'all') params.append('priority', priority);
-      
-      const response = await fetch(`${API_BASE_URL}/api/tasks/search?${params}`);
+        }
+      });
       if (!response.ok) throw new Error('Failed to search tasks');
       return await response.json();
     } catch (error) {
@@ -134,13 +109,21 @@ const api = {
 // Custom hook for theme management
 const useTheme = () => {
   const [theme, setTheme] = useState(() => {
-    return localStorage.getItem('theme') || 'light';
+    try {
+      return sessionStorage.getItem('theme') || 'light';
+    } catch {
+      return 'light';
+    }
   });
 
   const toggleTheme = () => {
     const newTheme = theme === 'light' ? 'dark' : 'light';
     setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
+    try {
+      sessionStorage.setItem('theme', newTheme);
+    } catch {
+      // Handle case where sessionStorage is not available
+    }
     document.documentElement.setAttribute('data-theme', newTheme);
   };
 
@@ -162,11 +145,13 @@ const useTaskManager = () => {
     try {
       setLoading(true);
       setError(null);
+      console.log('Loading tasks for user:', getUserId());
       const tasksData = await api.getTasks();
+      console.log('Tasks loaded:', tasksData);
       setTasks(tasksData);
     } catch (err) {
-      setError('Failed to load tasks');
       console.error('Error loading tasks:', err);
+      setError(`Failed to load tasks: ${err.message}`);
     } finally {
       setLoading(false);
     }
