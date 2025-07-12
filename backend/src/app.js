@@ -1,14 +1,13 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
-const { Redis } = require('@upstash/redis');
 const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware - UPDATED CORS configuration
+// Middleware - CORS configuration
 app.use(cors({
   origin: [
     'https://taskflow-1-oq08.onrender.com',  // Your frontend URL
@@ -43,51 +42,7 @@ if (process.env.DATABASE_URL) {
   });
 }
 
-// Upstash Redis connection
-const redisClient = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
-
-// Initialize Redis connection
-const initRedis = async () => {
-  try {
-    await redisClient.ping();
-    console.log('✅ Connected to Upstash Redis');
-  } catch (error) {
-    console.error('Failed to connect to Upstash Redis:', error);
-  }
-};
-
-// Cache configuration
-const CACHE_TTL = 300; // 5 minutes in seconds
-const CACHE_KEYS = {
-  USER_TASKS: 'user_tasks:',
-  TASK_BY_ID: 'task:',
-  USER_SESSION: 'session:'
-};
-
-// Helper function to get cache key for user tasks
-const getUserTasksCacheKey = (userId) => `${CACHE_KEYS.USER_TASKS}${userId}`;
-
-// Helper function to get cache key for task by ID
-const getTaskCacheKey = (id) => `${CACHE_KEYS.TASK_BY_ID}${id}`;
-
-// Helper function to get user session cache key
-const getUserSessionCacheKey = (userId) => `${CACHE_KEYS.USER_SESSION}${userId}`;
-
-// Cache invalidation helper - only for specific user
-const invalidateUserTaskCaches = async (userId) => {
-  try {
-    const userTasksKey = getUserTasksCacheKey(userId);
-    await redisClient.del(userTasksKey);
-    console.log(`🗑️ User ${userId} task cache invalidated`);
-  } catch (error) {
-    console.error('Error invalidating user cache:', error);
-  }
-};
-
-// Middleware to handle user sessions
+// Middleware to handle user sessions (without Redis)
 const handleUserSession = async (req, res, next) => {
   try {
     let userId = req.headers['x-user-id'];
@@ -98,18 +53,12 @@ const handleUserSession = async (req, res, next) => {
       res.setHeader('X-User-Id', userId);
     }
     
-    // Store user session in Redis (optional - for tracking active users)
-    const sessionKey = getUserSessionCacheKey(userId);
-    await redisClient.setex(sessionKey, 3600, { // 1 hour session
-      lastActivity: new Date().toISOString(),
-      userAgent: req.headers['user-agent'] || 'unknown'
-    });
-    
     req.userId = userId;
+    console.log(`👤 User session: ${userId}`);
     next();
   } catch (error) {
     console.error('Error handling user session:', error);
-    // Continue without session if Redis fails
+    // Continue without session if there's an error
     req.userId = req.headers['x-user-id'] || uuidv4();
     next();
   }
@@ -122,10 +71,11 @@ const testDbConnection = async () => {
     console.log('✅ Connected to PostgreSQL');
   } catch (error) {
     console.error('❌ PostgreSQL connection error:', error);
+    throw error;
   }
 };
 
-// UPDATED: Initialize database with user_id column
+// Initialize database with user_id column
 const initializeDatabase = async () => {
   try {
     // Check if the table exists
@@ -216,6 +166,7 @@ const initializeDatabase = async () => {
     
   } catch (error) {
     console.error('❌ Error during database initialization:', error.message);
+    throw error;
   }
 };
 
@@ -226,7 +177,7 @@ app.get('/', (req, res) => {
   res.json({
     message: 'Task Management API',
     version: '2.0.0',
-    features: ['User Sessions', 'Task Isolation', 'Caching'],
+    features: ['User Sessions', 'Task Isolation', 'No Cache (Redis Disabled)'],
     endpoints: {
       health: '/health',
       tasks: '/api/tasks',
@@ -239,14 +190,13 @@ app.get('/', (req, res) => {
 app.get('/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
-    await redisClient.ping();
     
     res.json({ 
       status: 'healthy', 
       timestamp: new Date().toISOString(),
       services: {
         database: 'connected',
-        redis: 'connected'
+        redis: 'disabled'
       }
     });
   } catch (error) {
@@ -258,7 +208,7 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// UPDATED: Search tasks for specific user (MOVED TO FIRST POSITION)
+// Search tasks for specific user
 app.get('/api/tasks/search', handleUserSession, async (req, res) => {
   const { q: query, status, priority, limit = 10 } = req.query;
   const userId = req.userId;
@@ -294,6 +244,7 @@ app.get('/api/tasks/search', handleUserSession, async (req, res) => {
     values.push(parseInt(limit));
     
     const result = await pool.query(searchQuery, values);
+    console.log(`🔍 Search results for user ${userId}: ${result.rows.length} tasks found`);
     res.json(result.rows);
   } catch (error) {
     console.error('Error searching tasks:', error);
@@ -301,21 +252,11 @@ app.get('/api/tasks/search', handleUserSession, async (req, res) => {
   }
 });
 
-// UPDATED: Get all tasks for specific user (MOVED TO SECOND POSITION)
+// Get all tasks for specific user
 app.get('/api/tasks', handleUserSession, async (req, res) => {
   try {
     const userId = req.userId;
-    const cacheKey = getUserTasksCacheKey(userId);
     
-    // Try to get from cache first
-    const cachedTasks = await redisClient.get(cacheKey);
-    
-    if (cachedTasks) {
-      console.log(`📋 Serving tasks for user ${userId} from Redis cache`);
-      return res.json(cachedTasks);
-    }
-    
-    // If not in cache, get from database
     console.log(`🔍 Fetching tasks for user ${userId} from database`);
     const result = await pool.query(`
       SELECT id, title, description, status, priority, created_at, updated_at 
@@ -325,10 +266,7 @@ app.get('/api/tasks', handleUserSession, async (req, res) => {
     `, [userId]);
     
     const tasks = result.rows;
-    
-    // Cache the result
-    await redisClient.setex(cacheKey, CACHE_TTL, tasks);
-    console.log(`💾 Tasks for user ${userId} cached in Redis`);
+    console.log(`📋 Found ${tasks.length} tasks for user ${userId}`);
     
     res.json(tasks);
   } catch (error) {
@@ -337,7 +275,7 @@ app.get('/api/tasks', handleUserSession, async (req, res) => {
   }
 });
 
-// UPDATED: Get single task by ID (with user ownership check) (THIRD POSITION)
+// Get single task by ID (with user ownership check)
 app.get('/api/tasks/:id', handleUserSession, async (req, res) => {
   const { id } = req.params;
   const userId = req.userId;
@@ -353,6 +291,7 @@ app.get('/api/tasks/:id', handleUserSession, async (req, res) => {
       return res.status(404).json({ error: 'Task not found' });
     }
     
+    console.log(`📋 Task ${id} fetched for user ${userId}`);
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Error fetching task:', error);
@@ -360,7 +299,7 @@ app.get('/api/tasks/:id', handleUserSession, async (req, res) => {
   }
 });
 
-// UPDATED: Create new task with user association
+// Create new task with user association
 app.post('/api/tasks', handleUserSession, async (req, res) => {
   const { title, description, status = 'pending', priority = 'medium' } = req.body;
   const userId = req.userId;
@@ -377,9 +316,7 @@ app.post('/api/tasks', handleUserSession, async (req, res) => {
     `, [userId, title.trim(), description?.trim() || '', status, priority]);
     
     const newTask = result.rows[0];
-    
-    // Invalidate only this user's cache
-    await invalidateUserTaskCaches(userId);
+    console.log(`✅ Task created for user ${userId}: ${newTask.title}`);
     
     res.status(201).json(newTask);
   } catch (error) {
@@ -388,7 +325,7 @@ app.post('/api/tasks', handleUserSession, async (req, res) => {
   }
 });
 
-// UPDATED: Update task with user ownership check
+// Update task with user ownership check
 app.put('/api/tasks/:id', handleUserSession, async (req, res) => {
   const { id } = req.params;
   const { title, description, status, priority } = req.body;
@@ -444,9 +381,7 @@ app.put('/api/tasks/:id', handleUserSession, async (req, res) => {
     }
     
     const updatedTask = result.rows[0];
-    
-    // Invalidate only this user's cache
-    await invalidateUserTaskCaches(userId);
+    console.log(`✅ Task ${id} updated for user ${userId}`);
     
     res.json(updatedTask);
   } catch (error) {
@@ -455,7 +390,7 @@ app.put('/api/tasks/:id', handleUserSession, async (req, res) => {
   }
 });
 
-// UPDATED: Delete task with user ownership check
+// Delete task with user ownership check
 app.delete('/api/tasks/:id', handleUserSession, async (req, res) => {
   const { id } = req.params;
   const userId = req.userId;
@@ -470,9 +405,7 @@ app.delete('/api/tasks/:id', handleUserSession, async (req, res) => {
       return res.status(404).json({ error: 'Task not found' });
     }
     
-    // Invalidate only this user's cache
-    await invalidateUserTaskCaches(userId);
-    
+    console.log(`🗑️ Task ${id} deleted for user ${userId}`);
     res.json({ message: 'Task deleted successfully', id: parseInt(id) });
   } catch (error) {
     console.error('Error deleting task:', error);
@@ -480,34 +413,31 @@ app.delete('/api/tasks/:id', handleUserSession, async (req, res) => {
   }
 });
 
-// Clear user's cache only
-app.delete('/api/cache', handleUserSession, async (req, res) => {
-  try {
-    const userId = req.userId;
-    await invalidateUserTaskCaches(userId);
-    res.json({ message: 'User cache cleared successfully' });
-  } catch (error) {
-    console.error('Error clearing user cache:', error);
-    res.status(500).json({ error: 'Failed to clear cache' });
-  }
-});
-
 // Get user session info
 app.get('/api/user/session', handleUserSession, async (req, res) => {
   try {
     const userId = req.userId;
-    const sessionKey = getUserSessionCacheKey(userId);
-    const sessionData = await redisClient.get(sessionKey);
     
     res.json({
       userId,
-      session: sessionData || null,
-      isNewUser: !sessionData
+      session: null, // No Redis session data
+      isNewUser: false,
+      cacheStatus: 'disabled'
     });
   } catch (error) {
     console.error('Error getting session info:', error);
     res.status(500).json({ error: 'Failed to get session info' });
   }
+});
+
+// Test endpoint for debugging
+app.get('/test', (req, res) => {
+  res.json({
+    message: 'Backend is working!',
+    timestamp: new Date().toISOString(),
+    nodeVersion: process.version,
+    env: process.env.NODE_ENV || 'development'
+  });
 });
 
 // Error handling middleware
@@ -538,17 +468,38 @@ process.on('SIGINT', async () => {
 // Start server function
 const startServer = async () => {
   try {
-    await testDbConnection();
-    await initializeDatabase();
-    await initRedis();
+    console.log('🚀 Starting server...');
     
-    app.listen(PORT, () => {
+    // Test database connection
+    console.log('🔍 Testing database connection...');
+    await testDbConnection();
+    
+    // Initialize database
+    console.log('🔍 Initializing database...');
+    await initializeDatabase();
+    
+    console.log('⚠️ Redis disabled - running without cache');
+    
+    // Start the server
+    const server = app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Server running on port ${PORT}`);
-      console.log(`📡 Health check: http://localhost:${PORT}/health`);
-      console.log(`📋 API endpoints: http://localhost:${PORT}/api/tasks`);
+      console.log(`📡 Health check: https://taskflow-ljzo.onrender.com/health`);
+      console.log(`📋 API endpoints: https://taskflow-ljzo.onrender.com/api/tasks`);
+      console.log(`🔧 Cache: Disabled (Redis removed)`);
     });
+    
+    // Handle server errors
+    server.on('error', (error) => {
+      console.error('❌ Server error:', error);
+      if (error.code === 'EADDRINUSE') {
+        console.error(`❌ Port ${PORT} is already in use`);
+      }
+      process.exit(1);
+    });
+    
   } catch (error) {
-    console.error('Failed to start server:', error);
+    console.error('❌ Failed to start server:', error);
+    console.error('❌ Error details:', error.message);
     process.exit(1);
   }
 };
