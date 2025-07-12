@@ -258,7 +258,50 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// UPDATED: Get all tasks for specific user
+// UPDATED: Search tasks for specific user (MOVED TO FIRST POSITION)
+app.get('/api/tasks/search', handleUserSession, async (req, res) => {
+  const { q: query, status, priority, limit = 10 } = req.query;
+  const userId = req.userId;
+  
+  try {
+    let searchQuery = `
+      SELECT id, title, description, status, priority, created_at, updated_at
+      FROM tasks 
+      WHERE user_id = $1
+    `;
+    const values = [userId];
+    let paramCount = 2;
+    
+    if (query && query.trim()) {
+      searchQuery += ` AND (LOWER(title) LIKE LOWER($${paramCount}) OR LOWER(description) LIKE LOWER($${paramCount}))`;
+      values.push(`%${query.trim()}%`);
+      paramCount++;
+    }
+    
+    if (status && status !== 'all') {
+      searchQuery += ` AND status = $${paramCount}`;
+      values.push(status);
+      paramCount++;
+    }
+    
+    if (priority && priority !== 'all') {
+      searchQuery += ` AND priority = $${paramCount}`;
+      values.push(priority);
+      paramCount++;
+    }
+    
+    searchQuery += ` ORDER BY created_at DESC LIMIT $${paramCount}`;
+    values.push(parseInt(limit));
+    
+    const result = await pool.query(searchQuery, values);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error searching tasks:', error);
+    res.status(500).json({ error: 'Failed to search tasks' });
+  }
+});
+
+// UPDATED: Get all tasks for specific user (MOVED TO SECOND POSITION)
 app.get('/api/tasks', handleUserSession, async (req, res) => {
   try {
     const userId = req.userId;
@@ -294,7 +337,7 @@ app.get('/api/tasks', handleUserSession, async (req, res) => {
   }
 });
 
-// UPDATED: Get single task by ID (with user ownership check)
+// UPDATED: Get single task by ID (with user ownership check) (THIRD POSITION)
 app.get('/api/tasks/:id', handleUserSession, async (req, res) => {
   const { id } = req.params;
   const userId = req.userId;
@@ -434,49 +477,6 @@ app.delete('/api/tasks/:id', handleUserSession, async (req, res) => {
   } catch (error) {
     console.error('Error deleting task:', error);
     res.status(500).json({ error: 'Failed to delete task' });
-  }
-});
-
-// UPDATED: Search tasks for specific user
-app.get('/api/tasks/search', handleUserSession, async (req, res) => {
-  const { q: query, status, priority, limit = 10 } = req.query;
-  const userId = req.userId;
-  
-  try {
-    let searchQuery = `
-      SELECT id, title, description, status, priority, created_at, updated_at
-      FROM tasks 
-      WHERE user_id = $1
-    `;
-    const values = [userId];
-    let paramCount = 2;
-    
-    if (query && query.trim()) {
-      searchQuery += ` AND (LOWER(title) LIKE LOWER($${paramCount}) OR LOWER(description) LIKE LOWER($${paramCount}))`;
-      values.push(`%${query.trim()}%`);
-      paramCount++;
-    }
-    
-    if (status && status !== 'all') {
-      searchQuery += ` AND status = $${paramCount}`;
-      values.push(status);
-      paramCount++;
-    }
-    
-    if (priority && priority !== 'all') {
-      searchQuery += ` AND priority = $${paramCount}`;
-      values.push(priority);
-      paramCount++;
-    }
-    
-    searchQuery += ` ORDER BY created_at DESC LIMIT $${paramCount}`;
-    values.push(parseInt(limit));
-    
-    const result = await pool.query(searchQuery, values);
-    res.json(result.rows);
-  } catch (error) {
-    console.error('Error searching tasks:', error);
-    res.status(500).json({ error: 'Failed to search tasks' });
   }
 });
 
