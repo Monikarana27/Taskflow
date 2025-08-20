@@ -306,12 +306,7 @@ docker-compose exec postgres psql -U postgres -d taskmanager
 
 ---
 
-## 📞 Contact & Demo
 
-**Live Demo:** [Your deployment URL]  
-**GitHub:** [Your repository URL]  
-**LinkedIn:** [Your LinkedIn profile]  
-**Email:** [Your email]
 
 *"I'd be happy to walk through the codebase, explain the architecture decisions, or demonstrate the AI search functionality during our interview!"*
 
